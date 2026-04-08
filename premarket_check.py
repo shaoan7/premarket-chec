@@ -13,8 +13,6 @@ import yfinance as yf
 # ========== 設定區 ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-FX_THRESHOLD = 0.10
-SPREAD_THRESHOLD = 100
 # ============================
 
 MONTH_CODES = {1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
@@ -34,11 +32,40 @@ def get_usdtwd():
 
 
 def judge_fx(diff):
-    if diff <= -FX_THRESHOLD:
-        return f"台幣明顯升值（{diff:+.3f}）→ 外資錢進來，權值股有機會"
-    if diff >= FX_THRESHOLD:
-        return f"台幣明顯貶值（{diff:+.3f}）→ 外資匯出，今天別衝"
-    return f"匯率平盤（{diff:+.3f}）→ 回到個股判斷"
+    """模糊判斷匯率。diff > 0 = 台幣貶值，diff < 0 = 台幣升值。
+    回傳 (文字說明, 分數)，分數 -100~+100，正=偏多 負=偏空。
+    """
+    # 台幣升值 (diff < 0) → 外資流入 → 偏多 (正分)
+    # 台幣貶值 (diff > 0) → 外資流出 → 偏空 (負分)
+    score = -diff * 500  # 0.1元 → ±50分, 0.2元 → ±100分
+    score = max(-100, min(100, score))
+
+    abs_diff = abs(diff)
+    if abs_diff < 0.03:
+        level = "幾乎沒動"
+    elif abs_diff < 0.06:
+        level = "微幅"
+    elif abs_diff < 0.10:
+        level = "小幅"
+    elif abs_diff < 0.15:
+        level = "明顯"
+    elif abs_diff < 0.25:
+        level = "大幅"
+    else:
+        level = "劇烈"
+
+    direction = "升值" if diff < 0 else "貶值"
+    emoji = "🟢" if diff < -0.03 else "🔴" if diff > 0.03 else "⚪"
+
+    if abs_diff < 0.03:
+        hint = "匯率中性，回到個股判斷"
+    elif diff < 0:
+        hint = "外資錢進來，權值股有機會" if abs_diff >= 0.10 else "外資小幅匯入，稍偏多"
+    else:
+        hint = "外資匯出，今天別衝" if abs_diff >= 0.10 else "外資小幅匯出，稍偏空"
+
+    text = f"{emoji} 台幣{level}{direction}（{diff:+.3f}）→ {hint}（信心 {abs(score):.0f}%）"
+    return text, score
 
 
 # ── 台指期（Yahoo only）──
@@ -110,34 +137,109 @@ def get_night_from_yahoo(symbol):
 
 
 def judge_futures(spread):
+    """模糊判斷期貨價差。正價差=偏多，逆價差=偏空。
+    回傳 (文字說明, 分數)，分數 -100~+100。
+    """
     if spread is None:
-        return "台指期資料抓取失敗，請手動確認"
+        return "台指期資料抓取失敗，請手動確認", 0
+
     month = dt.date.today().month
-    warn = "（⚠️ 除息旺季，記得扣除息點數再判斷）" if month in (6, 7, 8) else ""
-    if spread >= SPREAD_THRESHOLD:
-        return f"正價差 {spread:+.0f} 點 → 開高機率高{warn}"
-    if spread <= -SPREAD_THRESHOLD:
-        return f"逆價差 {spread:+.0f} 點 → 開低機率高{warn}"
-    return f"價差 {spread:+.0f} 點 → 無明顯方向{warn}"
+    warn = "\n  ⚠️ 除息旺季，記得扣除息點數再判斷" if month in (6, 7, 8) else ""
+
+    # 200點 → ±100分
+    score = spread / 2.0
+    score = max(-100, min(100, score))
+
+    abs_sp = abs(spread)
+    if abs_sp < 30:
+        level = "極小"
+    elif abs_sp < 60:
+        level = "小幅"
+    elif abs_sp < 100:
+        level = "中等"
+    elif abs_sp < 150:
+        level = "明顯"
+    elif abs_sp < 250:
+        level = "大幅"
+    else:
+        level = "極端"
+
+    direction = "正價差" if spread >= 0 else "逆價差"
+    emoji = "🟢" if spread > 30 else "🔴" if spread < -30 else "⚪"
+
+    if abs_sp < 30:
+        hint = "期現貨接近，方向不明"
+    elif spread > 0:
+        hint = "開高機率高，可順勢做多" if abs_sp >= 100 else "稍偏多，但力道不強"
+    else:
+        hint = "開低機率高，不要亂接刀" if abs_sp >= 100 else "稍偏空，但力道不強"
+
+    text = f"{emoji} {level}{direction} {spread:+.0f} 點 → {hint}（信心 {abs(score):.0f}%）{warn}"
+    return text, score
 
 
 # ── 綜合判斷 ──
 
-def overall_direction(fx_diff, spread):
-    fx_bull = fx_diff <= -FX_THRESHOLD
-    fx_bear = fx_diff >= FX_THRESHOLD
-    fut_bull = spread is not None and spread >= SPREAD_THRESHOLD
-    fut_bear = spread is not None and spread <= -SPREAD_THRESHOLD
+def overall_direction(fx_score, fut_score):
+    """模糊綜合判斷：加權匯率 40% + 期貨 60%，產生最終方向。"""
+    # 期貨權重較高（比匯率更直接反映隔日方向）
+    total = fx_score * 0.4 + fut_score * 0.6
 
-    if fx_bull and fut_bull:
-        return "方向偏多。權值股優先。"
-    if fx_bear and fut_bear:
-        return "方向偏空。今天別衝。"
-    if fx_bull or fut_bull:
-        return "偏多但訊號不一致。小量試單，嚴設停損。"
-    if fx_bear or fut_bear:
-        return "偏空但訊號不一致。觀望為主。"
-    return "方向不明。等 9:15 再決定。"
+    # 一致性加分：兩個訊號同向時信心更高
+    if fx_score * fut_score > 0:  # 同號
+        total *= 1.2
+    elif fx_score * fut_score < 0:  # 反號
+        total *= 0.7
+
+    total = max(-100, min(100, total))
+
+    # 模糊歸類
+    if total >= 60:
+        direction = "🟢🟢 強烈偏多"
+        action = "權值股優先，可積極做多。"
+    elif total >= 30:
+        direction = "🟢 偏多"
+        action = "順勢做多，但控制部位。"
+    elif total >= 10:
+        direction = "🟢 微偏多"
+        action = "小量試單，嚴設停損。"
+    elif total > -10:
+        direction = "⚪ 中性"
+        action = "方向不明，等 9:15 再決定。"
+    elif total > -30:
+        direction = "🔴 微偏空"
+        action = "觀望為主，不追高。"
+    elif total > -60:
+        direction = "🔴 偏空"
+        action = "今天別衝，等拉回再說。"
+    else:
+        direction = "🔴🔴 強烈偏空"
+        action = "空方主導，不要亂接刀。"
+
+    bar = _score_bar(total)
+    return f"{direction}（綜合 {total:+.0f}）\n  {bar}\n  → {action}"
+
+
+def _score_bar(score):
+    """視覺化分數條：-100 到 +100。"""
+    # 20格，中間是 0
+    width = 20
+    mid = width // 2
+    filled = int(abs(score) / 100 * mid)
+    filled = max(1, min(mid, filled))
+
+    bar = list("─" * width)
+    bar[mid] = "│"
+    if score > 0:
+        for i in range(mid + 1, mid + 1 + filled):
+            if i < width:
+                bar[i] = "█"
+    elif score < 0:
+        for i in range(mid - filled, mid):
+            if i >= 0:
+                bar[i] = "█"
+
+    return f"空 [{''.join(bar)}] 多"
 
 
 # ── Telegram ──
@@ -162,34 +264,44 @@ def main():
     today = dt.date.today().strftime("%Y-%m-%d")
     lines = [f"📊 開盤前檢查 {today}", ""]
 
-    diff = 0
+    fx_score = 0
+    fut_score = 0
+
+    # 1. 匯率
     try:
         cur, prev, diff = get_usdtwd()
+        fx_text, fx_score = judge_fx(diff)
         lines.append(f"【匯率】USD/TWD {cur:.3f}（前日 {prev:.3f}）")
-        lines.append(f"  {judge_fx(diff)}")
+        lines.append(f"  {fx_text}")
     except Exception as e:
         lines.append(f"【匯率】抓取失敗：{e}")
 
     lines.append("")
 
+    # 2. 台指期
     spread = None
     try:
-        spot = float(yf.Ticker("^TWII").history(period="5d")["Close"].iloc[-1])
+        taiex = get_night_from_yahoo("WTX00")
+        if taiex:
+            spot = taiex["price"]
+        else:
+            spot = float(yf.Ticker("^TWII").history(period="5d")["Close"].iloc[-1])
         lines.append(f"【現貨】加權指數 {spot:.0f}")
         symbol = get_tx_symbol()
         yahoo = get_night_from_yahoo(symbol)
         if yahoo:
             spread = yahoo["price"] - spot
+            fut_text, fut_score = judge_futures(spread)
             lines.append(f"【夜盤】{symbol} 即時 {yahoo['price']:.0f}（{yahoo['source']}）")
             lines.append(f"  vs 現貨價差 {spread:+.0f} 點")
-            lines.append(f"  📐 {judge_futures(spread)}")
+            lines.append(f"  📐 {fut_text}")
         else:
             lines.append(f"【夜盤】{symbol} 抓不到價格")
     except Exception as e:
         lines.append(f"【期貨】抓取失敗：{e}")
 
     lines.append("")
-    lines.append(f"📝 {overall_direction(diff, spread)}")
+    lines.append(f"📝 {overall_direction(fx_score, fut_score)}")
     lines.append("")
     lines.append("⚠️ 分點籌碼請本地端用 debug_broker.py 手動確認")
 
