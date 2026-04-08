@@ -4,7 +4,7 @@ on:
   schedule:
     # UTC 時間。台灣時間 8:00 = UTC 0:00
     # 注意：GitHub Actions 排程會延遲 5-15 分鐘
-    - cron: '0 0 * * 1-5'
+    - cron: '35 0 * * 1-5'
   # 允許手動觸發（方便測試）
   workflow_dispatch:
 
