@@ -223,8 +223,7 @@ def overall_direction(fx_score, fut_score):
 
 def _score_bar(score):
     """視覺化分數條：-100 到 +100。"""
-    # 20格，中間是 0
-    width = 20
+    width = 10
     mid = width // 2
     filled = int(abs(score) / 100 * mid)
     filled = max(1, min(mid, filled))
@@ -240,7 +239,7 @@ def _score_bar(score):
             if i >= 0:
                 bar[i] = "█"
 
-    return f"空 [{''.join(bar)}] 多"
+    return f"空[{''.join(bar)}]多"
 
 
 # ── Telegram ──
