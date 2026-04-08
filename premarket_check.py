@@ -136,8 +136,8 @@ def get_night_from_yahoo(symbol):
     return None
 
 
-def judge_futures(spread):
-    """模糊判斷期貨價差。正價差=偏多，逆價差=偏空。
+def judge_futures(spread, spot=None):
+    """模糊判斷期貨價差（10 級，每級 0.2%，滿級 ≥2%）。
     回傳 (文字說明, 分數)，分數 -100~+100。
     """
     if spread is None:
@@ -146,35 +146,43 @@ def judge_futures(spread):
     month = dt.date.today().month
     warn = "\n  ⚠️ 除息旺季，記得扣除息點數再判斷" if month in (6, 7, 8) else ""
 
-    # 200點 → ±100分
-    score = spread / 2.0
-    score = max(-100, min(100, score))
+    pct = (spread / spot * 100) if spot and spot > 0 else 0
+    abs_pct = abs(pct)
 
-    abs_sp = abs(spread)
-    if abs_sp < 30:
-        level = "極小"
-    elif abs_sp < 60:
-        level = "小幅"
-    elif abs_sp < 100:
-        level = "中等"
-    elif abs_sp < 150:
-        level = "明顯"
-    elif abs_sp < 250:
-        level = "大幅"
-    else:
-        level = "極端"
+    # 10 級，每級 0.2%，滿級 ≥2%
+    level = min(10, int(abs_pct / 0.2) + (1 if abs_pct > 0 else 0))
+    level = max(0, level)
+
+    LABELS = [
+        "無感",         # 0: ~0%
+        "極微 (1/10)",  # 1: 0~0.2%
+        "微弱 (2/10)",  # 2: 0.2~0.4%
+        "輕微 (3/10)",  # 3: 0.4~0.6%
+        "小幅 (4/10)",  # 4: 0.6~0.8%
+        "中等 (5/10)",  # 5: 0.8~1.0%
+        "偏強 (6/10)",  # 6: 1.0~1.2%
+        "明顯 (7/10)",  # 7: 1.2~1.4%
+        "強勢 (8/10)",  # 8: 1.4~1.6%
+        "大幅 (9/10)",  # 9: 1.6~1.8%
+        "極端 (10/10)", # 10: ≥1.8%
+    ]
+
+    score = level * 10  # 0~100
+    if pct < 0:
+        score = -score
 
     direction = "正價差" if spread >= 0 else "逆價差"
-    emoji = "🟢" if spread > 30 else "🔴" if spread < -30 else "⚪"
+    emoji = "🟢" if level >= 1 and pct > 0 else "🔴" if level >= 1 and pct < 0 else "⚪"
 
-    if abs_sp < 30:
+    if level == 0:
         hint = "期現貨接近，方向不明"
-    elif spread > 0:
-        hint = "開高機率高，可順勢做多" if abs_sp >= 100 else "稍偏多，但力道不強"
+    elif pct > 0:
+        hint = "開高機率高，可順勢做多" if level >= 5 else "稍偏多，但力道不強"
     else:
-        hint = "開低機率高，不要亂接刀" if abs_sp >= 100 else "稍偏空，但力道不強"
+        hint = "開低機率高，不要亂接刀" if level >= 5 else "稍偏空，但力道不強"
 
-    text = f"{emoji} {level}{direction} {spread:+.0f} 點 → {hint}（信心 {abs(score):.0f}%）{warn}"
+    text = (f"{emoji} {LABELS[level]} {direction} {spread:+.0f} 點（{pct:+.2f}%）"
+            f"→ {hint}{warn}")
     return text, score
 
 
@@ -291,7 +299,7 @@ def main():
         yahoo = get_night_from_yahoo(symbol)
         if yahoo:
             spread = yahoo["price"] - spot
-            fut_text, fut_score = judge_futures(spread)
+            fut_text, fut_score = judge_futures(spread, spot)
             lines.append(f"【夜盤】{symbol} 即時 {yahoo['price']:.0f}（{yahoo['source']}）")
             lines.append(f"  vs 現貨價差 {spread:+.0f} 點")
             lines.append(f"  📐 {fut_text}")
