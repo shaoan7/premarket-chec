@@ -303,8 +303,6 @@ def main():
 
     lines.append("")
     lines.append(f"📝 {overall_direction(fx_score, fut_score)}")
-    lines.append("")
-    lines.append("⚠️ 分點籌碼請本地端用 debug_broker.py 手動確認")
 
     msg = "\n".join(lines)
     print(msg)
