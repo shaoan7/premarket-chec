@@ -192,13 +192,6 @@ def overall_direction(fx_score, fut_score):
     """模糊綜合判斷：加權匯率 40% + 期貨 60%，產生最終方向。"""
     # 期貨權重較高（比匯率更直接反映隔日方向）
     total = fx_score * 0.4 + fut_score * 0.6
-
-    # 一致性加分：兩個訊號同向時信心更高
-    if fx_score * fut_score > 0:  # 同號
-        total *= 1.2
-    elif fx_score * fut_score < 0:  # 反號
-        total *= 0.7
-
     total = max(-100, min(100, total))
 
     # 模糊歸類
