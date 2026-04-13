@@ -1,3 +1,4 @@
 yfinance
 requests
 beautifulsoup4
+functions-framework
