@@ -1,6 +1,6 @@
 """
 開盤前自動化檢查：匯率 + 台指期夜盤
-GitHub Actions 每天 8:35 (UTC 0:35) 執行，結果發到 Telegram。
+GCP Cloud Functions 版本
 """
 
 import datetime as dt
@@ -9,6 +9,7 @@ import re
 import os
 import requests
 import yfinance as yf
+import functions_framework  # <-- 新增：讓 GCP 可以呼叫
 
 # ========== 設定區 ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -35,8 +36,6 @@ def judge_fx(diff):
     """模糊判斷匯率。diff > 0 = 台幣貶值，diff < 0 = 台幣升值。
     回傳 (文字說明, 分數)，分數 -100~+100，正=偏多 負=偏空。
     """
-    # 台幣升值 (diff < 0) → 外資流入 → 偏多 (正分)
-    # 台幣貶值 (diff > 0) → 外資流出 → 偏空 (負分)
     score = -diff * 500  # 0.1元 → ±50分, 0.2元 → ±100分
     score = max(-100, min(100, score))
 
@@ -137,9 +136,7 @@ def get_night_from_yahoo(symbol):
 
 
 def judge_futures(spread, spot=None):
-    """模糊判斷期貨價差（10 級，每級 0.2%，滿級 ≥2%）。
-    回傳 (文字說明, 分數)，分數 -100~+100。
-    """
+    """模糊判斷期貨價差（10 級，每級 0.2%，滿級 ≥2%）。"""
     if spread is None:
         return "台指期資料抓取失敗，請手動確認", 0
 
@@ -149,7 +146,6 @@ def judge_futures(spread, spot=None):
     pct = (spread / spot * 100) if spot and spot > 0 else 0
     abs_pct = abs(pct)
 
-    # 10 級，每級 0.2%，滿級 ≥2%
     level = min(10, int(abs_pct / 0.2) + (1 if abs_pct > 0 else 0))
     level = max(0, level)
 
@@ -167,7 +163,7 @@ def judge_futures(spread, spot=None):
         "極端 (10/10)", # 10: ≥1.8%
     ]
 
-    score = level * 10  # 0~100
+    score = level * 10
     if pct < 0:
         score = -score
 
@@ -190,11 +186,9 @@ def judge_futures(spread, spot=None):
 
 def overall_direction(fx_score, fut_score):
     """模糊綜合判斷：加權匯率 40% + 期貨 60%，產生最終方向。"""
-    # 期貨權重較高（比匯率更直接反映隔日方向）
     total = fx_score * 0.4 + fut_score * 0.6
     total = max(-100, min(100, total))
 
-    # 模糊歸類
     if total >= 60:
         direction = "🟢🟢 強烈偏多"
         action = "權值股優先，可積極做多。"
@@ -260,7 +254,8 @@ def send_telegram(text):
 
 # ── 主程式 ──
 
-def main():
+@functions_framework.http  # <-- 新增：設定為 HTTP 觸發
+def main(request):         # <-- 新增：接收 request 參數
     today = dt.date.today().strftime("%Y-%m-%d")
     lines = [f"📊 開盤前檢查 {today}", ""]
 
@@ -306,7 +301,11 @@ def main():
     msg = "\n".join(lines)
     print(msg)
     send_telegram(msg)
+    
+    return "OK", 200  # <-- 新增：回報 GCP 程式執行成功
 
-
+# 保留這個讓你在自己電腦上也能單獨測試
 if __name__ == "__main__":
-    main()
+    class MockRequest:
+        pass
+    main(MockRequest())
