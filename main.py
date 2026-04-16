@@ -9,16 +9,12 @@ import re
 import os
 import requests
 import yfinance as yf
-import functions_framework  # <-- 新增：讓 GCP 可以呼叫
+import functions_framework
 
 # ========== 設定區 ==========
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 # ============================
-
-MONTH_CODES = {1: "F", 2: "G", 3: "H", 4: "J", 5: "K", 6: "M",
-               7: "N", 8: "Q", 9: "U", 10: "V", 11: "X", 12: "Z"}
-
 
 # ── 匯率 ──
 
@@ -33,10 +29,7 @@ def get_usdtwd():
 
 
 def judge_fx(diff):
-    """模糊判斷匯率。diff > 0 = 台幣貶值，diff < 0 = 台幣升值。
-    回傳 (文字說明, 分數)，分數 -100~+100，正=偏多 負=偏空。
-    """
-    score = -diff * 500  # 0.1元 → ±50分, 0.2元 → ±100分
+    score = -diff * 500
     score = max(-100, min(100, score))
 
     abs_diff = abs(diff)
@@ -67,12 +60,7 @@ def judge_fx(diff):
     return text, score
 
 
-# ── 台指期（Yahoo only）──
-
-def get_tx_symbol():
-    today = dt.date.today()
-    return f"WTX{MONTH_CODES[today.month]}{today.year % 10}"
-
+# ── 台指期（Yahoo TW 永續合約）──
 
 def _find_price_in_json(obj, keys=("regularMarketPrice", "last", "price", "lastPrice"), depth=0):
     if depth > 25 or obj is None:
@@ -102,8 +90,12 @@ def _find_price_in_json(obj, keys=("regularMarketPrice", "last", "price", "lastP
     return None
 
 
-def get_night_from_yahoo(symbol):
-    url = f"https://tw.stock.yahoo.com/quote/{symbol}"
+def get_night_futures():
+    """
+    抓 https://tw.stock.yahoo.com/future/WTX& 自動取得最近月台指期，
+    回傳 {"symbol": "顯示名稱", "price": float, "source": str} 或 None
+    """
+    url = "https://tw.stock.yahoo.com/future/WTX&"
     headers = {
         "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
@@ -112,31 +104,45 @@ def get_night_from_yahoo(symbol):
     r = requests.get(url, headers=headers, timeout=15)
     r.raise_for_status()
     html = r.text
+
+    # 嘗試從 __NEXT_DATA__ JSON 取價格
     m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html, re.DOTALL)
+    price = None
     if m:
         try:
             data = json.loads(m.group(1))
             price = _find_price_in_json(data)
-            if price:
-                return {"symbol": symbol, "price": price, "source": "Yahoo TW (JSON)"}
         except Exception:
             pass
-    for pattern in [
-        r'Fz\(32px\)[^>]*>([\d,]+\.\d+)<',
-        r'"regularMarketPrice"[^}]*?"raw":([\d.]+)',
-    ]:
-        m = re.search(pattern, html)
-        if m:
-            try:
-                return {"symbol": symbol, "price": float(m.group(1).replace(",", "")),
-                        "source": "Yahoo TW (HTML)"}
-            except ValueError:
-                continue
-    return None
+
+    # fallback：HTML pattern
+    if price is None:
+        for pattern in [
+            r'Fz\(32px\)[^>]*>([\d,]+\.\d+)<',
+            r'"regularMarketPrice"[^}]*?"raw":([\d.]+)',
+        ]:
+            fm = re.search(pattern, html)
+            if fm:
+                try:
+                    price = float(fm.group(1).replace(",", ""))
+                    break
+                except ValueError:
+                    continue
+
+    if price is None:
+        return None
+
+    # 嘗試從頁面標題抓實際合約名稱（如「台指期 202506」），找不到就用預設
+    symbol_display = "台指期近月(WTX&)"
+    tm = re.search(r'台指期\w*\s*(\d{6})', html)
+    if tm:
+        symbol_display = f"台指期 {tm.group(1)}"
+
+    source = "Yahoo TW future (JSON)" if m and price else "Yahoo TW future (HTML)"
+    return {"symbol": symbol_display, "price": price, "source": source}
 
 
 def judge_futures(spread, spot=None):
-    """模糊判斷期貨價差（10 級，每級 0.2%，滿級 ≥2%）。"""
     if spread is None:
         return "台指期資料抓取失敗，請手動確認", 0
 
@@ -150,17 +156,17 @@ def judge_futures(spread, spot=None):
     level = max(0, level)
 
     LABELS = [
-        "無感",         # 0: ~0%
-        "極微 (1/10)",  # 1: 0~0.2%
-        "微弱 (2/10)",  # 2: 0.2~0.4%
-        "輕微 (3/10)",  # 3: 0.4~0.6%
-        "小幅 (4/10)",  # 4: 0.6~0.8%
-        "中等 (5/10)",  # 5: 0.8~1.0%
-        "偏強 (6/10)",  # 6: 1.0~1.2%
-        "明顯 (7/10)",  # 7: 1.2~1.4%
-        "強勢 (8/10)",  # 8: 1.4~1.6%
-        "大幅 (9/10)",  # 9: 1.6~1.8%
-        "極端 (10/10)", # 10: ≥1.8%
+        "無感",
+        "極微 (1/10)",
+        "微弱 (2/10)",
+        "輕微 (3/10)",
+        "小幅 (4/10)",
+        "中等 (5/10)",
+        "偏強 (6/10)",
+        "明顯 (7/10)",
+        "強勢 (8/10)",
+        "大幅 (9/10)",
+        "極端 (10/10)",
     ]
 
     score = level * 10
@@ -185,7 +191,6 @@ def judge_futures(spread, spot=None):
 # ── 綜合判斷 ──
 
 def overall_direction(fx_score, fut_score):
-    """模糊綜合判斷：加權匯率 40% + 期貨 60%，產生最終方向。"""
     total = fx_score * 0.4 + fut_score * 0.6
     total = max(-100, min(100, total))
 
@@ -216,7 +221,6 @@ def overall_direction(fx_score, fut_score):
 
 
 def _score_bar(score):
-    """視覺化分數條：-100 到 +100。"""
     width = 10
     mid = width // 2
     filled = int(abs(score) / 100 * mid)
@@ -254,8 +258,8 @@ def send_telegram(text):
 
 # ── 主程式 ──
 
-@functions_framework.http  # <-- 新增：設定為 HTTP 觸發
-def main(request):         # <-- 新增：接收 request 參數
+@functions_framework.http
+def main(request):
     today = dt.date.today().strftime("%Y-%m-%d")
     lines = [f"📊 開盤前檢查 {today}", ""]
 
@@ -273,25 +277,42 @@ def main(request):         # <-- 新增：接收 request 參數
 
     lines.append("")
 
-    # 2. 台指期
-    spread = None
+    # 2. 台指期（WTX& 永續，自動近月）
     try:
-        taiex = get_night_from_yahoo("WTX00")
-        if taiex:
-            spot = taiex["price"]
-        else:
-            spot = float(yf.Ticker("^TWII").history(period="5d")["Close"].iloc[-1])
+        # 現貨基準：先試 WTX00，失敗再用 ^TWII
+        taiex = get_night_futures.__wrapped__ if hasattr(get_night_futures, "__wrapped__") else None
+        spot_data = None
+        try:
+            spot_raw = requests.get(
+                "https://tw.stock.yahoo.com/future/WTX00",
+                headers={"User-Agent": "Mozilla/5.0", "Accept-Language": "zh-TW"},
+                timeout=15,
+            )
+            spot_raw.raise_for_status()
+            _m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>',
+                           spot_raw.text, re.DOTALL)
+            if _m:
+                spot_data = _find_price_in_json(json.loads(_m.group(1)))
+        except Exception:
+            pass
+
+        if not spot_data:
+            spot_data = float(yf.Ticker("^TWII").history(period="5d")["Close"].iloc[-1])
+
+        spot = spot_data
         lines.append(f"【現貨】加權指數 {spot:.0f}")
-        symbol = get_tx_symbol()
-        yahoo = get_night_from_yahoo(symbol)
-        if yahoo:
-            spread = yahoo["price"] - spot
+
+        # 夜盤：WTX& 永續合約
+        futures = get_night_futures()
+        if futures:
+            spread = futures["price"] - spot
             fut_text, fut_score = judge_futures(spread, spot)
-            lines.append(f"【夜盤】{symbol} 即時 {yahoo['price']:.0f}（{yahoo['source']}）")
+            lines.append(f"【夜盤】{futures['symbol']} 即時 {futures['price']:.0f}（{futures['source']}）")
             lines.append(f"  vs 現貨價差 {spread:+.0f} 點")
             lines.append(f"  📐 {fut_text}")
         else:
-            lines.append(f"【夜盤】{symbol} 抓不到價格")
+            lines.append("【夜盤】WTX& 抓不到價格")
+
     except Exception as e:
         lines.append(f"【期貨】抓取失敗：{e}")
 
@@ -301,10 +322,10 @@ def main(request):         # <-- 新增：接收 request 參數
     msg = "\n".join(lines)
     print(msg)
     send_telegram(msg)
-    
-    return "OK", 200  # <-- 新增：回報 GCP 程式執行成功
 
-# 保留這個讓你在自己電腦上也能單獨測試
+    return "OK", 200
+
+
 if __name__ == "__main__":
     class MockRequest:
         pass
